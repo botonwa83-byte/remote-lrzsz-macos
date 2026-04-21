@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self';
+             script-src 'self' https://cdnjs.cloudflare.com https://unpkg.com;
+             style-src  'self' https://cdnjs.cloudflare.com;
+             font-src   'self' https://cdnjs.cloudflare.com;" />
+  <title>RemoteTool</title>
+
+  <!-- xterm.js -->
+  <link  rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addon-fit.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addon-web-links.min.js"></script>
+
+  <!-- zmodem.js (ZMODEM / lrzsz protocol) -->
+  <script src="https://unpkg.com/zmodem.js@0.1.10/src/zmodem.es6.js"></script>
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="titlebar"></div>
+
+<div id="app">
+  <!-- ── Sidebar ──────────────────────────────────────────────── -->
+  <aside id="sidebar">
+    <div id="sidebar-header">
+      <span id="sidebar-title">连接</span>
+      <button id="btn-new-conn" title="新建连接">+</button>
+    </div>
+    <div id="conn-list">
+      <!-- connection items rendered by JS -->
+    </div>
+    <div id="sidebar-footer">
+      <div class="sidebar-footer-label">RemoteTool · lrzsz Ready</div>
+    </div>
+  </aside>
+
+  <!-- ── Main ─────────────────────────────────────────────────── -->
+  <div id="main">
+    <!-- Tab bar -->
+    <div id="tab-bar"></div>
+
+    <!-- Terminal container -->
+    <div id="terminal-container">
+      <!-- Welcome screen -->
+      <div id="welcome">
+        <div id="welcome-icon">🖥️</div>
+        <div id="welcome-title">RemoteTool</div>
+        <div id="welcome-sub">从左侧选择连接，或点击 <strong>+</strong> 新建 SSH 连接<br>支持 lrzsz (ZMODEM) 文件传输</div>
+      </div>
+    </div>
+
+    <!-- Status bar -->
+    <div id="status-bar">
+      <div class="status-item">
+        <div class="status-dot" id="st-dot"></div>
+        <span id="st-text">未连接</span>
+      </div>
+      <div class="status-item" id="st-size">80×24</div>
+      <div id="status-transfer" class="hidden"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Connection modal ────────────────────────────────────────── -->
+<div class="modal-backdrop" id="conn-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-title">新建连接</span>
+      <button class="modal-close" id="modal-close-btn">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>连接名称</label>
+        <input id="f-name" type="text" placeholder="My Server" />
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>主机 / IP</label>
+          <input id="f-host" type="text" placeholder="192.168.1.100" />
+        </div>
+        <div class="field" style="max-width:90px">
+          <label>端口</label>
+          <input id="f-port" type="number" value="22" min="1" max="65535" />
+        </div>
+      </div>
+      <div class="field">
+        <label>用户名</label>
+        <input id="f-user" type="text" placeholder="root" />
+      </div>
+
+      <!-- Auth type tabs -->
+      <div class="field">
+        <label>认证方式</label>
+        <div class="auth-tabs">
+          <button class="auth-tab active" data-auth="password">密码</button>
+          <button class="auth-tab" data-auth="key">私钥</button>
+        </div>
+      </div>
+
+      <!-- Password auth -->
+      <div class="auth-panel active" id="auth-password">
+        <div class="field">
+          <label>密码</label>
+          <input id="f-pass" type="password" placeholder="••••••••" />
+        </div>
+      </div>
+
+      <!-- Key auth -->
+      <div class="auth-panel" id="auth-key">
+        <div class="field">
+          <label>私钥路径</label>
+          <div style="display:flex;gap:8px">
+            <input id="f-key" type="text" placeholder="~/.ssh/id_rsa" style="flex:1" />
+            <button class="btn btn-secondary" id="btn-browse-key" style="padding:7px 10px;font-size:12px">浏览</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>私钥密码（可选）</label>
+          <input id="f-passphrase" type="password" placeholder="passphrase" />
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="modal-cancel-btn">取消</button>
+      <button class="btn btn-primary" id="modal-save-btn">保存并连接</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── File transfer overlay ───────────────────────────────────── -->
+<div id="transfer-overlay">
+  <div class="transfer-header">
+    <div class="transfer-title">
+      <span class="transfer-icon" id="tr-icon">📤</span>
+      <span id="tr-title">文件传输</span>
+    </div>
+    <button class="transfer-close" id="tr-close-btn">✕</button>
+  </div>
+  <div class="transfer-filename" id="tr-filename">-</div>
+  <div class="transfer-progress-bar">
+    <div class="transfer-progress-fill" id="tr-fill"></div>
+  </div>
+  <div class="transfer-stats">
+    <span id="tr-bytes">0 B</span>
+    <span id="tr-pct">0%</span>
+    <span id="tr-speed">-</span>
+  </div>
+  <button class="transfer-cancel" id="tr-cancel-btn">取消传输</button>
+</div>
+
+<!-- ── Toast ───────────────────────────────────────────────────── -->
+<div id="toast"></div>
+
+<script src="renderer.js"></script>
+</body>
+</html>
