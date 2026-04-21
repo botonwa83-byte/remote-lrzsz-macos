@@ -1,0 +1,39 @@
+{
+  "name": "macos-remote-tool",
+  "version": "1.0.0",
+  "description": "macOS SSH Remote Tool with lrzsz (ZMODEM) support",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --mac",
+    "dist:dmg": "electron-builder --mac dmg"
+  },
+  "build": {
+    "appId": "com.remotetool.app",
+    "productName": "RemoteTool",
+    "copyright": "Copyright © 2024",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "minimumSystemVersion": "12.0",
+      "darkModeSupport": true
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "node_modules/**/*"
+    ]
+  },
+  "dependencies": {
+    "ssh2": "^1.15.0"
+  },
+  "devDependencies": {
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1"
+  }
+}
