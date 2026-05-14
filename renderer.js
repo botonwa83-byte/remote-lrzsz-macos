@@ -293,6 +293,22 @@ async function handleRZ(sessionId, zs) {
   const s = sessions.get(sessionId);
   console.log('[RZ DEBUG] Starting rz upload session');
 
+  // 修复 ZMODEM 协议状态机问题
+  const origConsumeHeader = zs._consume_header;
+  zs._consume_header = function(header) {
+    if (!this._next_header_handler || !this._next_header_handler[header.NAME]) {
+      console.log(`[RZ DEBUG] Unexpected header: ${header.NAME}, handlers:`, this._next_header_handler);
+      if (header.NAME === 'ZRPOS') {
+        // 服务器请求重传位置信息，发送 ZRINIT 响应
+        this._consume_ZRINIT && this._consume_ZRINIT(header);
+        return;
+      }
+      console.warn('ZMODEM: ignoring unexpected header:', header.NAME);
+      return;
+    }
+    return origConsumeHeader.call(this, header);
+  };
+
   showToast('rz 已触发，请选择要上传的文件…');
   const r = await window.electronAPI.showOpenDialog({ properties: ['openFile','multiSelections'] });
   if (r.canceled || !r.filePaths.length) { 
@@ -329,9 +345,18 @@ async function handleRZ(sessionId, zs) {
     const t0 = Date.now(); let sent = 0;
     
     try {
-      await new Promise((res, rej) => {
+      const uploadPromise = new Promise((res, rej) => {
         console.log('[RZ DEBUG] Calling zs.send_offer...');
+        
+        // 设置超时
+        const timeout = setTimeout(() => {
+          console.error('[RZ DEBUG] send_offer timeout - server did not respond');
+          rej(new Error('服务器响应超时'));
+        }, 30000);
+        
         zs.send_offer({ name: f.name, size: f.data.length, mtime: new Date() }, xfer => {
+          clearTimeout(timeout);
+          
           if (!xfer) { 
             console.log('[RZ DEBUG] xfer is null, offer rejected');
             res(); 
@@ -387,6 +412,8 @@ async function handleRZ(sessionId, zs) {
           xfer.start();
         });
       });
+      
+      await uploadPromise;
       successCount++;
       console.log(`[RZ DEBUG] File ${f.name} uploaded successfully`);
     } catch (e) {
