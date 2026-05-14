@@ -19,14 +19,18 @@
         {
           "target": "dmg",
           "arch": [
-            "x64",
             "arm64"
           ]
         }
       ],
       "minimumSystemVersion": "12.0",
-      "darkModeSupport": true
+      "darkModeSupport": true,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "timestamp": false,
+      "sign": false
     },
+    "afterSign": null,
     "files": [
       "main.js",
       "preload.js",
