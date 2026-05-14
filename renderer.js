@@ -293,22 +293,6 @@ async function handleRZ(sessionId, zs) {
   const s = sessions.get(sessionId);
   console.log('[RZ DEBUG] Starting rz upload session');
 
-  // 修复 ZMODEM 协议状态机问题
-  const origConsumeHeader = zs._consume_header;
-  zs._consume_header = function(header) {
-    if (!this._next_header_handler || !this._next_header_handler[header.NAME]) {
-      console.log(`[RZ DEBUG] Unexpected header: ${header.NAME}, handlers:`, this._next_header_handler);
-      if (header.NAME === 'ZRPOS') {
-        // 服务器请求重传位置信息，发送 ZRINIT 响应
-        this._consume_ZRINIT && this._consume_ZRINIT(header);
-        return;
-      }
-      console.warn('ZMODEM: ignoring unexpected header:', header.NAME);
-      return;
-    }
-    return origConsumeHeader.call(this, header);
-  };
-
   showToast('rz 已触发，请选择要上传的文件…');
   const r = await window.electronAPI.showOpenDialog({ properties: ['openFile','multiSelections'] });
   if (r.canceled || !r.filePaths.length) { 
@@ -343,19 +327,48 @@ async function handleRZ(sessionId, zs) {
     console.log(`[RZ DEBUG] Uploading file ${idx}/${files.length}: ${f.name}, size: ${f.data.length}`);
     showTransfer('upload', f.name, f.data.length, idx, files.length);
     const t0 = Date.now(); let sent = 0;
+    let transferOffset = 0;
     
     try {
       const uploadPromise = new Promise((res, rej) => {
         console.log('[RZ DEBUG] Calling zs.send_offer...');
         
-        // 设置超时
         const timeout = setTimeout(() => {
-          console.error('[RZ DEBUG] send_offer timeout - server did not respond');
+          console.error('[RZ DEBUG] send_offer timeout');
           rej(new Error('服务器响应超时'));
         }, 30000);
         
+        // 正确处理 ZRPOS 响应
+        const origConsumeHeader = zs._consume_header;
+        zs._consume_header = function(header) {
+          if (!this._next_header_handler || !this._next_header_handler[header.NAME]) {
+            console.log(`[RZ DEBUG] Unexpected header: ${header.NAME}`);
+            if (header.NAME === 'ZRPOS') {
+              // ZRPOS: 服务器请求从特定位置开始传输
+              // 格式: ZRPOS + 4字节位置（大端序）
+              const pos = header.DATA.readUInt32BE(0);
+              console.log(`[RZ DEBUG] ZRPOS received, server wants position: ${pos}`);
+              transferOffset = pos;
+              
+              // 发送 ZDATA 响应继续传输
+              if (this._send_ZDATA) {
+                const remaining = f.data.length - pos;
+                const chunkSize = Math.min(8192, remaining);
+                const chunk = f.data.slice(pos, pos + chunkSize);
+                console.log(`[RZ DEBUG] Sending ZDATA from position ${pos}, size: ${chunk.length}`);
+                this._send_ZDATA(chunk, pos + chunk.length >= f.data.length);
+              }
+              return;
+            }
+            console.warn('ZMODEM: ignoring unexpected header:', header.NAME);
+            return;
+          }
+          return origConsumeHeader.call(this, header);
+        };
+        
         zs.send_offer({ name: f.name, size: f.data.length, mtime: new Date() }, xfer => {
           clearTimeout(timeout);
+          zs._consume_header = origConsumeHeader;
           
           if (!xfer) { 
             console.log('[RZ DEBUG] xfer is null, offer rejected');
@@ -366,7 +379,7 @@ async function handleRZ(sessionId, zs) {
           if (s) s.ztransfer = xfer;
           
           const CHUNK = 8192;
-          let off = 0;
+          let off = transferOffset;
           let chunksSent = 0;
           
           xfer.on('free', () => {
@@ -396,16 +409,13 @@ async function handleRZ(sessionId, zs) {
           });
           
           xfer.on('error', (e) => {
+            zs._consume_header = origConsumeHeader;
             console.error('[RZ DEBUG] xfer error:', e);
             rej(e);
           });
           
           xfer.on('start', () => {
             console.log('[RZ DEBUG] xfer.start event');
-          });
-          
-          xfer.on('data', (d) => {
-            console.log('[RZ DEBUG] xfer.data event:', d.length, 'bytes');
           });
           
           console.log('[RZ DEBUG] Calling xfer.start()');
@@ -422,12 +432,18 @@ async function handleRZ(sessionId, zs) {
     }
   }
   
-  console.log('[RZ DEBUG] All files processed, closing ZMODEM session');
+  console.log('[RZ DEBUG] All files processed');
   try {
     await zs.close();
     console.log('[RZ DEBUG] ZMODEM session closed successfully');
   } catch (e) {
-    console.error('[RZ DEBUG] Error closing ZMODEM session:', e);
+    console.error('[RZ DEBUG] Error closing ZMODEM session, aborting...');
+    try {
+      zs.abort();
+      console.log('[RZ DEBUG] ZMODEM session aborted');
+    } catch (e2) {
+      console.error('[RZ DEBUG] Failed to abort:', e2);
+    }
   }
   
   if (s) { s.zactive = false; s.ztransfer = null; }
