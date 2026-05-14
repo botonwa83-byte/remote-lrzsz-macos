@@ -291,51 +291,107 @@ function buildZSentry(sessionId, term) {
 
 async function handleRZ(sessionId, zs) {
   const s = sessions.get(sessionId);
-  // Set a safe handler for ZRINIT re-sends while file dialog is open,
-  // otherwise _consume_header throws on unhandled headers and breaks the protocol
-  zs._next_header_handler = zs._next_header_handler || {
-    ZRINIT: function(hdr) { zs._consume_ZRINIT && zs._consume_ZRINIT(hdr); }
+  const startTime = Date.now();
+
+  // Monkey-patch _consume_header to gracefully handle unexpected headers.
+  // The library throws when _next_header_handler is null/undefined or missing
+  // the received header type. During rz, the remote re-sends ZRINIT as keepalive
+  // while we're in the file dialog, which breaks the protocol.
+  const origConsumeHeader = zs._consume_header;
+  zs._consume_header = function(header) {
+    if (!this._next_header_handler || !this._next_header_handler[header.NAME]) {
+      if (header.NAME === 'ZRINIT') {
+        this._consume_ZRINIT && this._consume_ZRINIT(header);
+        return;
+      }
+      console.warn('ZMODEM: ignoring unexpected header:', header.NAME);
+      return;
+    }
+    return origConsumeHeader.call(this, header);
   };
+
+  // Skip the ZSINIT handshake which often hangs (remote responds with ZRINIT instead of ZACK)
+  zs._got_ZSINIT_ZACK = true;
+
   showToast('rz 已触发，请选择要上传的文件…');
   const r = await window.electronAPI.showOpenDialog({ properties: ['openFile','multiSelections'] });
-  if (r.canceled || !r.filePaths.length) { zs.abort(); if(s){s.zactive=false;} hideTransfer(); return; }
-  
+  if (r.canceled || !r.filePaths.length) { 
+    zs.abort(); 
+    if(s){s.zactive=false;} 
+    hideTransfer(); 
+    return; 
+  }
+
   const files = [];
   for (const fp of r.filePaths) {
     const res = await window.electronAPI.readFile(fp);
     if (res.ok) files.push({ name: res.name, data: new Uint8Array(res.data) });
   }
-  
-  if (!files.length) { zs.abort(); if(s){s.zactive=false;} hideTransfer(); return; }
-  
-  let idx = 0;
-  for (const f of files) {
-    idx++;
-    showTransfer('upload', f.name, f.data.length, idx, files.length);
+
+  if (!files.length) { 
+    zs.abort(); 
+    if(s){s.zactive=false;} 
+    hideTransfer(); 
+    return; 
+  }
+
+  let successCount = 0;
+  for (let idx = 0; idx < files.length; idx++) {
+    const f = files[idx];
+    showTransfer('upload', f.name, f.data.length, idx + 1, files.length);
     const t0 = Date.now();
-    const xfer = await zs.send_offer({ name: f.name, size: f.data.length, mtime: new Date() });
-    if (!xfer) continue; // offer rejected by remote
-    if (s) s.ztransfer = xfer;
-    const CHUNK = 8192; let off = 0;
-    await new Promise((resolve, reject) => {
-      function sendNextChunk() {
-        if (off >= f.data.length) {
-          xfer.end().then(resolve).catch(reject);
-          return;
-        }
-        const sl = f.data.slice(off, off + CHUNK); off += sl.length;
-        updateTransfer(off, f.data.length, t0);
-        xfer.send(sl);
-        setTimeout(sendNextChunk, 0);
+    try {
+      const xfer = await zs.send_offer({ name: f.name, size: f.data.length, mtime: new Date() });
+      if (!xfer) {
+        console.warn(`File offer rejected: ${f.name}`);
+        continue;
       }
-      sendNextChunk();
-    });
+      if (s) s.ztransfer = xfer;
+      
+      await xfer.accept();
+      
+      const CHUNK = 8192; 
+      let off = 0;
+      await new Promise((resolve, reject) => {
+        const sendNext = () => {
+          if (off >= f.data.length) {
+            xfer.end().then(resolve).catch(reject);
+            return;
+          }
+          const sl = f.data.slice(off, off + CHUNK); 
+          off += sl.length;
+          updateTransfer(off, f.data.length, t0);
+          xfer.send(sl);
+          setTimeout(sendNext, 0);
+        };
+        sendNext();
+      });
+      successCount++;
+    } catch (e) {
+      console.error(`Error uploading ${f.name}:`, e);
+      showToast(`上传失败: ${f.name}`, 'error');
+    }
+  }
+
+  // 确保进度条一定关闭
+  hideTransfer();
+  
+  // 尝试关闭 ZMODEM session，但不等待太久
+  try {
+    await Promise.race([
+      zs.close(),
+      new Promise(resolve => setTimeout(resolve, 3000))
+    ]);
+  } catch (e) {
+    console.warn('Error closing ZMODEM session:', e);
   }
   
-  await zs.close();
-  if (s) { s.zactive = false; s.ztransfer = null; }
-  hideTransfer();
-  showToast(`✅ 上传完成 (${files.length} 个文件)`, 'success');
+  if (s) { 
+    s.zactive = false; 
+    s.ztransfer = null; 
+  }
+  
+  showToast(`✅ 上传完成 (${successCount}/${files.length} 个文件)`, successCount === files.length ? 'success' : 'info');
 }
 
 async function handleSZ(sessionId, zs) {
