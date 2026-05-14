@@ -46,8 +46,12 @@ async function init() {
     if (!s) return;
     try {
       s.zsentry.consume(new Uint8Array(data));
-    } catch (_) {
-      s.term.write(new Uint8Array(data));
+    } catch (e) {
+      if (!s.zactive) {
+        s.term.write(new Uint8Array(data));
+      } else {
+        console.warn('ZMODEM consume error (ignored during active transfer):', e);
+      }
     }
   });
 
@@ -287,6 +291,11 @@ function buildZSentry(sessionId, term) {
 
 async function handleRZ(sessionId, zs) {
   const s = sessions.get(sessionId);
+  // Set a safe handler for ZRINIT re-sends while file dialog is open,
+  // otherwise _consume_header throws on unhandled headers and breaks the protocol
+  zs._next_header_handler = zs._next_header_handler || {
+    ZRINIT: function(hdr) { zs._consume_ZRINIT && zs._consume_ZRINIT(hdr); }
+  };
   showToast('rz 已触发，请选择要上传的文件…');
   const r = await window.electronAPI.showOpenDialog({ properties: ['openFile','multiSelections'] });
   if (r.canceled || !r.filePaths.length) { zs.abort(); if(s){s.zactive=false;} hideTransfer(); return; }
@@ -303,42 +312,23 @@ async function handleRZ(sessionId, zs) {
   for (const f of files) {
     idx++;
     showTransfer('upload', f.name, f.data.length, idx, files.length);
-    const t0 = Date.now(); let sent = 0;
-    
+    const t0 = Date.now();
+    const xfer = await zs.send_offer({ name: f.name, size: f.data.length, mtime: new Date() });
+    if (!xfer) continue; // offer rejected by remote
+    if (s) s.ztransfer = xfer;
+    const CHUNK = 8192; let off = 0;
     await new Promise((resolve, reject) => {
-      zs.send_offer({ name: f.name, size: f.data.length, mtime: new Date() }, xfer => {
-        if (!xfer) { resolve(); return; }
-        if (s) s.ztransfer = xfer;
-        
-        const CHUNK = 8192;
-        let off = 0;
-        
-        xfer.accept().then(() => {
-          function sendNextChunk() {
-            if (off >= f.data.length) {
-              xfer.end().then(resolve).catch(reject);
-              return;
-            }
-            
-            const remaining = f.data.length - off;
-            const toSend = Math.min(CHUNK, remaining);
-            const sl = f.data.slice(off, off + toSend);
-            off += toSend;
-            sent += toSend;
-            
-            updateTransfer(sent, f.data.length, t0);
-            xfer.send(sl);
-            
-            queueMicrotask(sendNextChunk);
-          }
-          
-          sendNextChunk();
-        }).catch(reject);
-        
-        xfer.on('error', (e) => {
-          reject(e);
-        });
-      });
+      function sendNextChunk() {
+        if (off >= f.data.length) {
+          xfer.end().then(resolve).catch(reject);
+          return;
+        }
+        const sl = f.data.slice(off, off + CHUNK); off += sl.length;
+        updateTransfer(off, f.data.length, t0);
+        xfer.send(sl);
+        setTimeout(sendNextChunk, 0);
+      }
+      sendNextChunk();
     });
   }
   

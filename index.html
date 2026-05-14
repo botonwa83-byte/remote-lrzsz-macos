@@ -4,69 +4,52 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'self';
-             script-src 'self' https://cdnjs.cloudflare.com https://unpkg.com;
-             style-src  'self' https://cdnjs.cloudflare.com;
-             font-src   'self' https://cdnjs.cloudflare.com;" />
+    content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:;" />
   <title>RemoteTool</title>
 
-  <!-- xterm.js -->
-  <link  rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addon-fit.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addon-web-links.min.js"></script>
-
-  <!-- zmodem.js (ZMODEM / lrzsz protocol) -->
-  <script src="https://unpkg.com/zmodem.js@0.1.10/src/zmodem.es6.js"></script>
+  <!-- 本地 lib/ 目录，开发和打包后均可用 -->
+  <link  rel="stylesheet" href="lib/xterm.css" />
+  <script src="lib/xterm.js"></script>
+  <script src="lib/xterm-addon-fit.js"></script>
+  <script src="lib/xterm-addon-web-links.js"></script>
+  <script src="lib/zmodem.js"></script>
 
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 <div id="titlebar"></div>
-
 <div id="app">
-  <!-- ── Sidebar ──────────────────────────────────────────────── -->
   <aside id="sidebar">
     <div id="sidebar-header">
       <span id="sidebar-title">连接</span>
       <button id="btn-new-conn" title="新建连接">+</button>
     </div>
-    <div id="conn-list">
-      <!-- connection items rendered by JS -->
-    </div>
+    <div id="conn-list"></div>
     <div id="sidebar-footer">
       <div class="sidebar-footer-label">RemoteTool · lrzsz Ready</div>
     </div>
   </aside>
-
-  <!-- ── Main ─────────────────────────────────────────────────── -->
   <div id="main">
-    <!-- Tab bar -->
     <div id="tab-bar"></div>
-
-    <!-- Terminal container -->
     <div id="terminal-container">
-      <!-- Welcome screen -->
       <div id="welcome">
         <div id="welcome-icon">🖥️</div>
         <div id="welcome-title">RemoteTool</div>
         <div id="welcome-sub">从左侧选择连接，或点击 <strong>+</strong> 新建 SSH 连接<br>支持 lrzsz (ZMODEM) 文件传输</div>
       </div>
     </div>
-
-    <!-- Status bar -->
     <div id="status-bar">
       <div class="status-item">
         <div class="status-dot" id="st-dot"></div>
         <span id="st-text">未连接</span>
       </div>
-      <div class="status-item" id="st-size">80×24</div>
+      <div class="status-item" id="st-size">-</div>
       <div id="status-transfer" class="hidden"></div>
     </div>
   </div>
 </div>
 
-<!-- ── Connection modal ────────────────────────────────────────── -->
+<!-- 连接弹窗 -->
 <div class="modal-backdrop" id="conn-modal">
   <div class="modal">
     <div class="modal-header">
@@ -92,8 +75,6 @@
         <label>用户名</label>
         <input id="f-user" type="text" placeholder="root" />
       </div>
-
-      <!-- Auth type tabs -->
       <div class="field">
         <label>认证方式</label>
         <div class="auth-tabs">
@@ -101,16 +82,12 @@
           <button class="auth-tab" data-auth="key">私钥</button>
         </div>
       </div>
-
-      <!-- Password auth -->
       <div class="auth-panel active" id="auth-password">
         <div class="field">
           <label>密码</label>
           <input id="f-pass" type="password" placeholder="••••••••" />
         </div>
       </div>
-
-      <!-- Key auth -->
       <div class="auth-panel" id="auth-key">
         <div class="field">
           <label>私钥路径</label>
@@ -125,15 +102,14 @@
         </div>
       </div>
     </div>
-
     <div class="modal-footer">
       <button class="btn btn-secondary" id="modal-cancel-btn">取消</button>
-      <button class="btn btn-primary" id="modal-save-btn">保存并连接</button>
+      <button class="btn btn-primary"   id="modal-save-btn">保存并连接</button>
     </div>
   </div>
 </div>
 
-<!-- ── File transfer overlay ───────────────────────────────────── -->
+<!-- 文件传输进度 -->
 <div id="transfer-overlay">
   <div class="transfer-header">
     <div class="transfer-title">
@@ -154,9 +130,7 @@
   <button class="transfer-cancel" id="tr-cancel-btn">取消传输</button>
 </div>
 
-<!-- ── Toast ───────────────────────────────────────────────────── -->
 <div id="toast"></div>
-
 <script src="renderer.js"></script>
 </body>
 </html>

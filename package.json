@@ -16,8 +16,13 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": [
-        { "target": "dmg", "arch": ["x64", "arm64"] },
-        { "target": "zip", "arch": ["x64", "arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ],
       "minimumSystemVersion": "12.0",
       "darkModeSupport": true
@@ -25,9 +30,13 @@
     "files": [
       "main.js",
       "preload.js",
-      "src/**/*",
-      "node_modules/**/*"
-    ]
+      "index.html",
+      "renderer.js",
+      "styles.css",
+      "lib/**/*",
+      "node_modules/ssh2/**/*"
+    ],
+    "asar": false
   },
   "dependencies": {
     "ssh2": "^1.15.0"

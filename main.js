@@ -1,21 +1,45 @@
+/**
+ * main.js — RemoteTool v6
+ * ssh2@0.8.9 纯 JS，无原生模块
+ */
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
 const path = require('path');
-const { Client } = require('ssh2');
-const fs = require('fs');
-const os = require('os');
+const fs   = require('fs');
+const os   = require('os');
 
-let mainWindow;
-// Map<sessionId, { conn: Client, stream: Channel }>
-const sshSessions = new Map();
+// ── 日志（同时输出到终端和文件）──────────────────────────────────────────────
+const LOG_DIR  = path.join(os.homedir(), '.remotetool');
+const LOG_FILE = path.join(LOG_DIR, 'debug.log');
+function log(...a) {
+  const s = `[${new Date().toISOString()}] ${a.join(' ')}\n`;
+  process.stdout.write(s);
+  try {
+    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.appendFileSync(LOG_FILE, s);
+  } catch (_) {}
+}
+process.on('uncaughtException',  e => log('FATAL uncaughtException',  e.stack || e));
+process.on('unhandledRejection', e => log('FATAL unhandledRejection:', e));
 
-// ─── Window ────────────────────────────────────────────────────────────────
+log('=== RemoteTool start ===');
+log('Node', process.version, 'Electron', process.versions.electron);
 
+// ── ssh2 ──────────────────────────────────────────────────────────────────────
+let SSHClient;
+try {
+  SSHClient = require('ssh2').Client;
+  log('ssh2 loaded OK');
+} catch (e) {
+  log('ssh2 load FAILED:', e.message);
+}
+
+const sessions = new Map();
+let mainWin;
+
+// ── BrowserWindow ─────────────────────────────────────────────────────────────
 function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 900,
-    minHeight: 600,
+  mainWin = new BrowserWindow({
+    width: 1280, height: 820, minWidth: 900, minHeight: 600,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
     vibrancy: 'under-window',
@@ -28,219 +52,160 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+  const htmlPath = path.join(__dirname, 'index.html');
+  log('loadFile:', htmlPath, 'exists:', fs.existsSync(htmlPath));
+  mainWin.loadFile(htmlPath);
 
-  mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
-
-  // Build application menu
-  const template = [
-    {
-      label: 'RemoteTool',
-      submenu: [
-        { label: 'About RemoteTool', role: 'about' },
-        { type: 'separator' },
-        { label: 'Hide RemoteTool', role: 'hide' },
-        { label: 'Hide Others', role: 'hideOthers' },
-        { type: 'separator' },
-        { label: 'Quit', role: 'quit' },
-      ],
-    },
-    {
-      label: 'Edit',
-      submenu: [
-        { label: 'Copy', role: 'copy' },
-        { label: 'Paste', role: 'paste' },
-        { label: 'Select All', role: 'selectAll' },
-      ],
-    },
-    {
-      label: 'View',
-      submenu: [
-        { label: 'Toggle Developer Tools', role: 'toggleDevTools' },
-        { type: 'separator' },
-        { label: 'Actual Size', role: 'resetZoom' },
-        { label: 'Zoom In', role: 'zoomIn' },
-        { label: 'Zoom Out', role: 'zoomOut' },
-      ],
-    },
-    {
-      label: 'Window',
-      submenu: [
-        { label: 'Minimize', role: 'minimize' },
-        { label: 'Zoom', role: 'zoom' },
-        { type: 'separator' },
-        { label: 'Bring All to Front', role: 'front' },
-      ],
-    },
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: 'RemoteTool', submenu: [
+      { label: 'About', role: 'about' }, { type: 'separator' },
+      { label: 'Hide',  role: 'hide'  }, { label: 'Quit', role: 'quit' },
+    ]},
+    { label: 'Edit', submenu: [
+      { label: 'Copy', role: 'copy' }, { label: 'Paste', role: 'paste' },
+      { label: 'Select All', role: 'selectAll' },
+    ]},
+    { label: 'View', submenu: [
+      { label: 'Toggle DevTools', role: 'toggleDevTools' },
+      { type: 'separator' },
+      { label: 'Actual Size', role: 'resetZoom' },
+      { label: 'Zoom In',  role: 'zoomIn'  },
+      { label: 'Zoom Out', role: 'zoomOut' },
+    ]},
+    { label: 'Window', submenu: [
+      { label: 'Minimize', role: 'minimize' }, { label: 'Zoom', role: 'zoom' },
+    ]},
+  ]));
 }
-
 app.whenReady().then(createWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
-// ─── SSH: Connect ──────────────────────────────────────────────────────────
+// ── SSH Connect ───────────────────────────────────────────────────────────────
+ipcMain.handle('ssh-connect', (event, cfg) => {
+  const { sessionId, host, port, username, password, privateKeyPath, passphrase } = cfg;
+  log(`ssh-connect called: ${username}@${host}:${port} sid=${sessionId}`);
 
-ipcMain.handle('ssh-connect', (event, config) => {
-  const { sessionId, host, port = 22, username, password, privateKeyPath, passphrase } = config;
+  if (!SSHClient) {
+    log('ERROR: SSHClient not loaded');
+    return Promise.reject('ssh2 模块未能加载，请检查 npm install ssh2@0.8.9');
+  }
 
   return new Promise((resolve, reject) => {
-    const conn = new Client();
+    const conn = new SSHClient();
 
     conn.on('ready', () => {
-      conn.shell(
-        { term: 'xterm-256color', cols: 220, rows: 50 },
-        (err, stream) => {
-          if (err) { conn.end(); return reject(err.message); }
-
-          sshSessions.set(sessionId, { conn, stream });
-
-          stream.on('data', (data) => {
-            mainWindow?.webContents.send('ssh-data', {
-              sessionId,
-              data: Array.from(data),
-            });
-          });
-
-          stream.stderr.on('data', (data) => {
-            mainWindow?.webContents.send('ssh-data', {
-              sessionId,
-              data: Array.from(data),
-            });
-          });
-
-          stream.on('close', () => {
-            mainWindow?.webContents.send('ssh-closed', { sessionId });
-            sshSessions.delete(sessionId);
-          });
-
-          resolve({ ok: true });
-        }
-      );
+      log(`[${sessionId}] READY → opening shell`);
+      conn.shell({ term: 'xterm-256color', cols: 200, rows: 50 }, (err, stream) => {
+        if (err) { conn.end(); return reject('shell: ' + err.message); }
+        sessions.set(sessionId, { conn, stream });
+        stream.on('data', data => {
+          mainWin?.webContents.send('ssh-data', { sessionId, data: Array.from(data) });
+        });
+        stream.stderr.on('data', data => {
+          mainWin?.webContents.send('ssh-data', { sessionId, data: Array.from(data) });
+        });
+        stream.on('close', () => {
+          log(`[${sessionId}] stream closed`);
+          mainWin?.webContents.send('ssh-closed', { sessionId });
+          sessions.delete(sessionId);
+        });
+        resolve({ ok: true });
+      });
     });
 
-    conn.on('error', (err) => reject(err.message));
-    conn.on('keyboard-interactive', (_n, _i, _il, prompts, finish) => {
-      // Simple keyboard-interactive: return password for first prompt
+    conn.on('error', err => {
+      log(`[${sessionId}] ERROR:`, err.message);
+      reject(err.message);
+    });
+
+    // keyboard-interactive 支持（堡垒机常用）
+    conn.on('keyboard-interactive', (name, instr, lang, prompts, finish) => {
+      log(`[${sessionId}] keyboard-interactive prompts:`, prompts.map(p => p.prompt).join(', '));
       finish(prompts.map(() => password || ''));
     });
 
-    // Build auth config
-    const cfg = { host, port, username, readyTimeout: 15000 };
+    // 服务器 banner（堡垒机登录提示）
+    conn.on('banner', msg => {
+      mainWin?.webContents.send('ssh-data', {
+        sessionId, data: Array.from(Buffer.from('\r\n' + msg + '\r\n')),
+      });
+    });
+
+    const connCfg = {
+      host, port: Number(port) || 22, username,
+      readyTimeout: 30000,
+      keepaliveInterval: 15000,
+      algorithms: {
+        kex: [
+          'ecdh-sha2-nistp256', 'ecdh-sha2-nistp384', 'ecdh-sha2-nistp521',
+          'diffie-hellman-group-exchange-sha256',
+          'diffie-hellman-group14-sha256', 'diffie-hellman-group14-sha1',
+          'diffie-hellman-group1-sha1',
+        ],
+        cipher: [
+          'aes128-ctr', 'aes192-ctr', 'aes256-ctr',
+          'aes128-gcm@openssh.com', 'aes256-gcm@openssh.com',
+          'aes128-cbc', 'aes256-cbc', '3des-cbc',
+        ],
+        serverHostKey: [
+          'ssh-rsa', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384',
+          'ecdsa-sha2-nistp521', 'ssh-ed25519',
+        ],
+        hmac: ['hmac-sha2-256', 'hmac-sha2-512', 'hmac-sha1', 'hmac-md5'],
+      },
+    };
+
     if (privateKeyPath) {
-      try {
-        cfg.privateKey = fs.readFileSync(privateKeyPath);
-        if (passphrase) cfg.passphrase = passphrase;
-      } catch (e) {
-        return reject(`Cannot read private key: ${e.message}`);
-      }
+      try { connCfg.privateKey = fs.readFileSync(privateKeyPath); }
+      catch (e) { return reject('读取私钥失败: ' + e.message); }
+      if (passphrase) connCfg.passphrase = passphrase;
     } else {
-      cfg.password = password;
-      cfg.tryKeyboard = true;
+      connCfg.password    = password;
+      connCfg.tryKeyboard = true;
     }
 
-    conn.connect(cfg);
+    log(`[${sessionId}] calling conn.connect()...`);
+    conn.connect(connCfg);
   });
 });
 
-// ─── SSH: Write data ────────────────────────────────────────────────────────
-
-ipcMain.on('ssh-write', (event, { sessionId, data }) => {
-  const session = sshSessions.get(sessionId);
-  if (!session) return;
-  session.stream.write(Buffer.from(data));
+ipcMain.on('ssh-write', (_, { sessionId, data }) => {
+  const s = sessions.get(sessionId);
+  if (s) try { s.stream.write(Buffer.from(data)); } catch (e) { log('write err', e.message); }
+});
+ipcMain.on('ssh-resize', (_, { sessionId, cols, rows }) => {
+  const s = sessions.get(sessionId);
+  if (s) try { s.stream.setWindow(rows, cols, 0, 0); } catch (_) {}
+});
+ipcMain.on('ssh-disconnect', (_, { sessionId }) => {
+  const s = sessions.get(sessionId);
+  if (!s) return;
+  try { s.conn.end(); } catch (_) {}
+  sessions.delete(sessionId);
 });
 
-// ─── SSH: Resize terminal ──────────────────────────────────────────────────
+ipcMain.handle('get-sshpass-status', () => ({ sshpassAvailable: false }));
 
-ipcMain.on('ssh-resize', (event, { sessionId, cols, rows }) => {
-  const session = sshSessions.get(sessionId);
-  if (!session) return;
-  try { session.stream.setWindow(rows, cols, 0, 0); } catch (_) {}
+// ── File I/O ──────────────────────────────────────────────────────────────────
+ipcMain.handle('show-save-dialog', async (_, o = {}) =>
+  dialog.showSaveDialog(mainWin, { title: '保存文件', defaultPath: path.join(os.homedir(), 'Downloads', o.filename || 'file'), ...o }));
+ipcMain.handle('show-open-dialog', async (_, o = {}) =>
+  dialog.showOpenDialog(mainWin, { title: '选择文件', defaultPath: os.homedir(), properties: ['openFile'], ...o }));
+ipcMain.handle('write-file', async (_, { filePath, data }) => {
+  try { fs.writeFileSync(filePath, Buffer.from(data)); return { ok: true }; }
+  catch (e) { return { ok: false, error: e.message }; }
 });
-
-// ─── SSH: Disconnect ───────────────────────────────────────────────────────
-
-ipcMain.on('ssh-disconnect', (event, { sessionId }) => {
-  const session = sshSessions.get(sessionId);
-  if (!session) return;
-  try { session.conn.end(); } catch (_) {}
-  sshSessions.delete(sessionId);
+ipcMain.handle('read-file', async (_, { filePath }) => {
+  try { const b = fs.readFileSync(filePath); return { ok: true, data: Array.from(b), name: path.basename(filePath) }; }
+  catch (e) { return { ok: false, error: e.message }; }
 });
+ipcMain.handle('reveal-file', async (_, { filePath }) => shell.showItemInFolder(filePath));
 
-// ─── File dialogs ──────────────────────────────────────────────────────────
-
-ipcMain.handle('show-save-dialog', async (event, opts = {}) => {
-  return dialog.showSaveDialog(mainWindow, {
-    title: 'Save Received File',
-    defaultPath: path.join(os.homedir(), 'Downloads', opts.filename || 'received-file'),
-    ...opts,
-  });
-});
-
-ipcMain.handle('show-open-dialog', async (event, opts = {}) => {
-  return dialog.showOpenDialog(mainWindow, {
-    title: 'Select File to Send',
-    defaultPath: os.homedir(),
-    properties: ['openFile'],
-    ...opts,
-  });
-});
-
-// ─── File I/O ──────────────────────────────────────────────────────────────
-
-ipcMain.handle('write-file', async (event, { filePath, data }) => {
-  try {
-    fs.writeFileSync(filePath, Buffer.from(data));
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-});
-
-ipcMain.handle('read-file', async (event, { filePath }) => {
-  try {
-    const buf = fs.readFileSync(filePath);
-    return { ok: true, data: Array.from(buf), name: path.basename(filePath) };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-});
-
-ipcMain.handle('reveal-file', async (event, { filePath }) => {
-  shell.showItemInFolder(filePath);
-});
-
-// ─── Saved connections (persist to ~/.remotetool/connections.json) ─────────
-
-const configDir = path.join(os.homedir(), '.remotetool');
-const configFile = path.join(configDir, 'connections.json');
-
-function loadConnections() {
-  try {
-    if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
-    if (!fs.existsSync(configFile)) return [];
-    return JSON.parse(fs.readFileSync(configFile, 'utf8'));
-  } catch { return []; }
-}
-
-function saveConnections(list) {
-  if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(configFile, JSON.stringify(list, null, 2), 'utf8');
-}
-
-ipcMain.handle('get-connections', () => loadConnections());
-
-ipcMain.handle('save-connection', (event, conn) => {
-  const list = loadConnections();
-  const idx = list.findIndex((c) => c.id === conn.id);
-  if (idx >= 0) list[idx] = conn; else list.push(conn);
-  saveConnections(list);
-  return list;
-});
-
-ipcMain.handle('delete-connection', (event, id) => {
-  const list = loadConnections().filter((c) => c.id !== id);
-  saveConnections(list);
-  return list;
-});
+// ── Saved connections ─────────────────────────────────────────────────────────
+const CF = path.join(LOG_DIR, 'connections.json');
+const loadC = () => { try { if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR,{recursive:true}); return fs.existsSync(CF) ? JSON.parse(fs.readFileSync(CF,'utf8')) : []; } catch { return []; } };
+const saveC = l => { if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR,{recursive:true}); fs.writeFileSync(CF, JSON.stringify(l,null,2)); };
+ipcMain.handle('get-connections',   ()      => loadC());
+ipcMain.handle('save-connection',   (_, c)  => { const l=loadC(); const i=l.findIndex(x=>x.id===c.id); i>=0?l[i]=c:l.push(c); saveC(l); return l; });
+ipcMain.handle('delete-connection', (_, id) => { const l=loadC().filter(c=>c.id!==id); saveC(l); return l; });
