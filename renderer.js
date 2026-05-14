@@ -291,62 +291,126 @@ function buildZSentry(sessionId, term) {
 
 async function handleRZ(sessionId, zs) {
   const s = sessions.get(sessionId);
+  console.log('[RZ DEBUG] Starting rz upload session');
 
   showToast('rz 已触发，请选择要上传的文件…');
   const r = await window.electronAPI.showOpenDialog({ properties: ['openFile','multiSelections'] });
-  if (r.canceled || !r.filePaths.length) { zs.abort(); if(s){s.zactive=false;} hideTransfer(); return; }
+  if (r.canceled || !r.filePaths.length) { 
+    console.log('[RZ DEBUG] User canceled or no files selected');
+    zs.abort(); 
+    if(s){s.zactive=false;} 
+    hideTransfer(); 
+    return; 
+  }
   
   const files = [];
   for (const fp of r.filePaths) {
     const res = await window.electronAPI.readFile(fp);
-    if (res.ok) files.push({ name: res.name, data: new Uint8Array(res.data) });
+    if (res.ok) {
+      files.push({ name: res.name, data: new Uint8Array(res.data) });
+      console.log(`[RZ DEBUG] Loaded file: ${res.name}, size: ${res.data.length} bytes`);
+    }
   }
   
-  if (!files.length) { zs.abort(); if(s){s.zactive=false;} hideTransfer(); return; }
+  if (!files.length) { 
+    console.log('[RZ DEBUG] No files loaded');
+    zs.abort(); 
+    if(s){s.zactive=false;} 
+    hideTransfer(); 
+    return; 
+  }
   
+  let successCount = 0;
   let idx = 0;
   for (const f of files) {
     idx++;
+    console.log(`[RZ DEBUG] Uploading file ${idx}/${files.length}: ${f.name}, size: ${f.data.length}`);
     showTransfer('upload', f.name, f.data.length, idx, files.length);
     const t0 = Date.now(); let sent = 0;
     
-    await new Promise((res, rej) => {
-      zs.send_offer({ name: f.name, size: f.data.length, mtime: new Date() }, xfer => {
-        if (!xfer) { res(); return; }
-        if (s) s.ztransfer = xfer;
-        
-        const CHUNK = 8192;
-        let off = 0;
-        
-        xfer.on('free', () => {
-          if (off >= f.data.length) {
-            xfer.end().then(res).catch(rej);
-            return;
+    try {
+      await new Promise((res, rej) => {
+        console.log('[RZ DEBUG] Calling zs.send_offer...');
+        zs.send_offer({ name: f.name, size: f.data.length, mtime: new Date() }, xfer => {
+          if (!xfer) { 
+            console.log('[RZ DEBUG] xfer is null, offer rejected');
+            res(); 
+            return; 
           }
+          console.log('[RZ DEBUG] xfer created successfully');
+          if (s) s.ztransfer = xfer;
           
-          const remaining = f.data.length - off;
-          const toSend = Math.min(CHUNK, remaining);
-          const sl = f.data.slice(off, off + toSend);
-          off += toSend;
-          sent += toSend;
+          const CHUNK = 8192;
+          let off = 0;
+          let chunksSent = 0;
           
-          updateTransfer(sent, f.data.length, t0);
-          xfer.send(sl);
+          xfer.on('free', () => {
+            console.log(`[RZ DEBUG] xfer.free event, off=${off}, length=${f.data.length}`);
+            if (off >= f.data.length) {
+              console.log('[RZ DEBUG] All chunks sent, calling xfer.end()');
+              xfer.end().then(() => {
+                console.log('[RZ DEBUG] xfer.end() completed');
+                res();
+              }).catch((e) => {
+                console.error('[RZ DEBUG] xfer.end() error:', e);
+                rej(e);
+              });
+              return;
+            }
+            
+            const remaining = f.data.length - off;
+            const toSend = Math.min(CHUNK, remaining);
+            const sl = f.data.slice(off, off + toSend);
+            off += toSend;
+            sent += toSend;
+            chunksSent++;
+            
+            console.log(`[RZ DEBUG] Sending chunk ${chunksSent}: ${toSend} bytes, total sent: ${sent}/${f.data.length}`);
+            updateTransfer(sent, f.data.length, t0);
+            xfer.send(sl);
+          });
+          
+          xfer.on('error', (e) => {
+            console.error('[RZ DEBUG] xfer error:', e);
+            rej(e);
+          });
+          
+          xfer.on('start', () => {
+            console.log('[RZ DEBUG] xfer.start event');
+          });
+          
+          xfer.on('data', (d) => {
+            console.log('[RZ DEBUG] xfer.data event:', d.length, 'bytes');
+          });
+          
+          console.log('[RZ DEBUG] Calling xfer.start()');
+          xfer.start();
         });
-        
-        xfer.on('error', (e) => {
-          rej(e);
-        });
-        
-        xfer.start();
       });
-    });
+      successCount++;
+      console.log(`[RZ DEBUG] File ${f.name} uploaded successfully`);
+    } catch (e) {
+      console.error(`[RZ DEBUG] Error uploading ${f.name}:`, e);
+      showToast(`上传失败: ${f.name} - ${e.message}`, 'error');
+    }
   }
   
-  await zs.close();
+  console.log('[RZ DEBUG] All files processed, closing ZMODEM session');
+  try {
+    await zs.close();
+    console.log('[RZ DEBUG] ZMODEM session closed successfully');
+  } catch (e) {
+    console.error('[RZ DEBUG] Error closing ZMODEM session:', e);
+  }
+  
   if (s) { s.zactive = false; s.ztransfer = null; }
   hideTransfer();
-  showToast(`✅ 上传完成 (${files.length} 个文件)`, 'success');
+  
+  const msg = successCount === files.length 
+    ? `✅ 上传完成 (${successCount}/${files.length} 个文件)` 
+    : `⚠️ 部分上传 (${successCount}/${files.length} 个文件)`;
+  showToast(msg, successCount === files.length ? 'success' : 'info');
+  console.log(`[RZ DEBUG] Upload session finished: ${successCount}/${files.length} files`);
 }
 
 async function handleSZ(sessionId, zs) {
