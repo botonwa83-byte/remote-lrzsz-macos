@@ -387,6 +387,74 @@ async function handleRZ(sessionId, zs) {
   handleRZDirect(sessionId);
 }
 
+async function handleUploadDirect(sessionId) {
+  const s = sessions.get(sessionId);
+  console.log('[UPLOAD DIRECT] Starting direct SFTP upload');
+
+  if (!s) {
+    showToast('会话不存在', 'error');
+    return;
+  }
+
+  try {
+    showToast('请选择要上传的文件…');
+    const dialogResult = await window.electronAPI.showOpenDialog({ properties: ['openFile','multiSelections'] });
+    if (dialogResult.canceled || !dialogResult.filePaths.length) {
+      return;
+    }
+
+    const cwdResult = await window.electronAPI.sshGetCwd(sessionId);
+    if (!cwdResult.ok) {
+      showToast('获取远程目录失败: ' + cwdResult.error, 'error');
+      s.term.writeln(`\r\n\x1b[31m[SFTP] 获取目录失败: ${cwdResult.error}\x1b[0m\r\n`);
+      return;
+    }
+    const remoteCwd = cwdResult.cwd;
+
+    const files = dialogResult.filePaths.map(fp => ({
+      localPath: fp,
+      name: fp.split('/').pop() || fp.split('\\').pop(),
+    }));
+
+    showTransfer('upload', files[0].name, 0, 1, files.length);
+    s.zactive = true;
+
+    const result = await window.electronAPI.sftpUploadFiles(sessionId, files, remoteCwd);
+
+    s.zactive = false;
+    hideTransfer();
+
+    if (result.ok) {
+      const successCount = result.results.filter(r => r.ok).length;
+      const failCount = result.results.filter(r => !r.ok).length;
+      
+      if (failCount === 0) {
+        showToast(`✅ 上传完成 (${successCount} 个文件 → ${remoteCwd})`, 'success');
+      } else {
+        showToast(`⚠️ 上传部分完成: ${successCount} 成功, ${failCount} 失败`, 'error');
+      }
+      
+      s.term.writeln(`\r\n\x1b[32m[SFTP] 已上传 ${successCount} 个文件到 ${remoteCwd}\x1b[0m`);
+      result.results.forEach(r => {
+        if (r.ok) s.term.writeln(`\x1b[32m  ✓ ${r.name} (${fmtBytes(r.size)})\x1b[0m`);
+        else s.term.writeln(`\x1b[31m  ✗ ${r.name}: ${r.error}\x1b[0m`);
+      });
+      s.term.writeln('');
+    } else {
+      showToast('❌ SFTP 上传失败: ' + result.error, 'error');
+      s.term.writeln(`\r\n\x1b[31m[SFTP] 上传失败: ${result.error}\x1b[0m\r\n`);
+    }
+  } catch (e) {
+    console.error('[UPLOAD DIRECT] Error:', e);
+    showToast('上传异常: ' + e.message, 'error');
+    if (s) {
+      s.zactive = false;
+      s.term.writeln(`\r\n\x1b[31m[SFTP] 上传异常: ${e.message}\x1b[0m\r\n`);
+    }
+    hideTransfer();
+  }
+}
+
 async function handleSZ(sessionId, zs) {
   const s = sessions.get(sessionId);
   zs.on('session_end', () => { if(s){s.zactive=false;s.ztransfer=null;} hideTransfer(); showToast('✅ 下载完成','success'); });
@@ -492,6 +560,25 @@ function bindEvents() {
     const s = sessions.get(activeId);
     if (s?.ztransfer) try { s.ztransfer.abort?.(); } catch (_) {}
     hideTransfer(); showToast('传输已取消');
+  });
+
+  // Add upload button handler (bypasses rz command entirely)
+  $('#btn-upload').addEventListener('click', () => {
+    if (!activeId) {
+      showToast('请先连接到服务器', 'error');
+      return;
+    }
+    const s = sessions.get(activeId);
+    if (!s || !s.connected) {
+      showToast('未连接到服务器', 'error');
+      return;
+    }
+    handleUploadDirect(activeId);
+  });
+
+  // Add download button handler
+  $('#btn-download').addEventListener('click', () => {
+    showToast('下载功能开发中', 'info');
   });
 
   document.addEventListener('keydown', e => {
