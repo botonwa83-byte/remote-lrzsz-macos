@@ -105,23 +105,49 @@
           <input id="f-passphrase" type="password" placeholder="passphrase" />
         </div>
       </div>
-      <div class="field-row" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
-        <div class="field" style="flex:2">
-          <label>堡垒机 (可选)</label>
-          <input id="f-bastion-host" type="text" placeholder="bastion.example.com" />
+      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+          <input type="checkbox" id="use-bastion" />
+          <label for="use-bastion" style="font-weight:600;color:var(--text)">通过堡垒机连接</label>
         </div>
-        <div class="field" style="flex:1">
-          <label>端口</label>
-          <input id="f-bastion-port" type="number" value="22" min="1" max="65535" />
+        <div id="bastion-panel" style="display:none;padding-left:28px;">
+          <div class="field-row">
+            <div class="field" style="flex:2">
+              <label>堡垒机地址</label>
+              <input id="f-bastion-host" type="text" placeholder="bastion.example.com" />
+            </div>
+            <div class="field" style="flex:1">
+              <label>端口</label>
+              <input id="f-bastion-port" type="number" value="22" min="1" max="65535" />
+            </div>
+          </div>
+          <div class="field">
+            <label>堡垒机用户名</label>
+            <input id="f-bastion-user" type="text" placeholder="用户名" />
+          </div>
+          <div class="field-row" style="gap:8px;">
+            <button class="btn btn-secondary bastion-auth-tab active" data-bastion-auth="password" style="flex:1;padding:6px">密码认证</button>
+            <button class="btn btn-secondary bastion-auth-tab" data-bastion-auth="key" style="flex:1;padding:6px">密钥认证</button>
+          </div>
+          <div class="bastion-auth-panel" id="bastion-auth-password">
+            <div class="field">
+              <label>堡垒机密码</label>
+              <input id="f-bastion-pass" type="password" placeholder="密码" />
+            </div>
+          </div>
+          <div class="bastion-auth-panel" id="bastion-auth-key" style="display:none">
+            <div class="field">
+              <label>堡垒机私钥路径</label>
+              <div style="display:flex;gap:8px">
+                <input id="f-bastion-key" type="text" placeholder="~/.ssh/id_rsa" style="flex:1" />
+              </div>
+            </div>
+            <div class="field">
+              <label>私钥密码（可选）</label>
+              <input id="f-bastion-key-pass" type="password" placeholder="passphrase" />
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="field" id="bastion-auth">
-        <label>堡垒机用户名</label>
-        <input id="f-bastion-user" type="text" placeholder="用户名" />
-      </div>
-      <div class="field">
-        <label>堡垒机密码/私钥</label>
-        <input id="f-bastion-pass" type="password" placeholder="密码或私钥路径" />
       </div>
     </div>
     <div class="modal-footer">

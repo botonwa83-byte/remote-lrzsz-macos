@@ -83,7 +83,7 @@ app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) creat
 
 // ── SSH Connect ───────────────────────────────────────────────────────────────
 ipcMain.handle('ssh-connect', (event, cfg) => {
-  const { sessionId, host, port, username, password, privateKeyPath, passphrase, bastionHost, bastionPort, bastionUser, bastionKey, bastionPass } = cfg;
+  const { sessionId, host, port, username, password, privateKeyPath, passphrase, bastionHost, bastionPort, bastionUser, bastionAuthType, bastionPassword, bastionPrivateKey, bastionPassphrase } = cfg;
   log(`ssh-connect called: ${username}@${host}:${port} sid=${sessionId}`);
   if (bastionHost) {
     log(`[${sessionId}] Bastion configured: ${bastionUser}@${bastionHost}:${bastionPort || 22}`);
@@ -180,14 +180,27 @@ ipcMain.handle('ssh-connect', (event, cfg) => {
     // 添加堡垒机支持 (ProxyJump)
     if (bastionHost) {
       log(`[${sessionId}] Setting up ProxyJump via ${bastionHost}`);
-      connCfg.proxyJump = {
+      const bastionCfg = {
         host: bastionHost,
         port: Number(bastionPort) || 22,
         username: bastionUser,
-        password: bastionPass,
-        privateKey: bastionKey ? fs.readFileSync(bastionKey) : undefined,
-        passphrase: bastionPass,
       };
+      if (bastionAuthType === 'password') {
+        bastionCfg.password = bastionPassword;
+        bastionCfg.tryKeyboard = true;
+      } else {
+        if (bastionPrivateKey) {
+          try {
+            bastionCfg.privateKey = fs.readFileSync(bastionPrivateKey);
+          } catch (e) {
+            return reject('读取堡垒机私钥失败: ' + e.message);
+          }
+        }
+        if (bastionPassphrase) {
+          bastionCfg.passphrase = bastionPassphrase;
+        }
+      }
+      connCfg.proxyJump = bastionCfg;
     }
 
     log(`[${sessionId}] calling conn.connect()...`);
@@ -248,6 +261,7 @@ function uploadFileViaExec(conn, sessionId, localPath, remoteDest) {
         return resolve({ ok: false, error: err.message });
       }
 
+      log(`[${sessionId}] exec stream created successfully`);
       let stderr = '';
       stream.stderr.on('data', (data) => { stderr += data.toString(); });
 
