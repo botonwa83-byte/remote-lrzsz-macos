@@ -55,6 +55,10 @@ async function init() {
     }
   });
 
+  window.electronAPI.onSftpProgress(({ sessionId, current, total, name, size }) => {
+    showTransfer('upload', name, size, current, total);
+  });
+
   window.electronAPI.onSSHClosed(({ sessionId }) => {
     const s = sessions.get(sessionId);
     if (!s) return;
@@ -291,99 +295,91 @@ function buildZSentry(sessionId, term) {
 
 async function handleRZ(sessionId, zs) {
   const s = sessions.get(sessionId);
-  console.log('[RZ DEBUG] Starting rz upload session');
+  console.log('[RZ DEBUG] Starting SFTP upload instead of ZMODEM');
 
-  showToast('rz 已触发，请选择要上传的文件…');
-  const r = await window.electronAPI.showOpenDialog({ properties: ['openFile','multiSelections'] });
-  if (r.canceled || !r.filePaths.length) { zs.abort(); if(s){s.zactive=false;} hideTransfer(); return; }
-  
-  const files = [];
-  for (const fp of r.filePaths) {
-    const res = await window.electronAPI.readFile(fp);
-    if (res.ok) {
-      files.push({ name: res.name, data: new Uint8Array(res.data) });
-      console.log(`[RZ DEBUG] Loaded file: ${res.name}, size: ${res.data.length} bytes`);
+  try {
+    // Abort ZMODEM session and clean up
+    try { zs.abort(); } catch (_) {}
+    if (s) { s.zactive = false; s.ztransfer = null; }
+
+    // Send Ctrl+C to kill remote rz process
+    await new Promise(r => setTimeout(r, 100));
+    window.electronAPI.writeSSH(sessionId, Array.from(new TextEncoder().encode('\x03')));
+    await new Promise(r => setTimeout(r, 200));
+
+    // Show file selection dialog
+    showToast('请选择要上传的文件…（使用 SFTP 传输）');
+    const dialogResult = await window.electronAPI.showOpenDialog({ properties: ['openFile','multiSelections'] });
+    if (dialogResult.canceled || !dialogResult.filePaths.length) { 
+      hideTransfer(); 
+      if (s) s.term.writeln('\r\n');
+      return; 
     }
-  }
-  
-  if (!files.length) { zs.abort(); if(s){s.zactive=false;} hideTransfer(); return; }
-  
-  let successCount = 0;
-  let idx = 0;
-  for (const f of files) {
-    idx++;
-    console.log(`[RZ DEBUG] Uploading file ${idx}/${files.length}: ${f.name}, size: ${f.data.length}`);
-    showTransfer('upload', f.name, f.data.length, idx, files.length);
-    const t0 = Date.now();
-    
-    try {
-      console.log('[RZ DEBUG] Calling zs.send_offer (async)...');
-      const xfer = await zs.send_offer({ name: f.name, size: f.data.length, mtime: new Date() });
-      console.log('[RZ DEBUG] xfer created:', !!xfer);
+
+    // Get remote working directory
+    console.log('[RZ DEBUG] Getting remote CWD');
+    const cwdResult = await window.electronAPI.sshGetCwd(sessionId);
+    if (!cwdResult.ok) {
+      showToast('获取远程目录失败: ' + cwdResult.error, 'error');
+      if (s) s.term.writeln(`\r\n\x1b[31m[SFTP] 获取目录失败: ${cwdResult.error}\x1b[0m\r\n`);
+      return;
+    }
+    const remoteCwd = cwdResult.cwd;
+    console.log('[RZ DEBUG] Remote CWD:', remoteCwd);
+
+    // Prepare file list
+    const files = dialogResult.filePaths.map(fp => ({
+      localPath: fp,
+      name: fp.split('/').pop() || fp.split('\\').pop(),
+    }));
+
+    console.log('[RZ DEBUG] Files to upload:', files);
+    showTransfer('upload', files[0].name, 0, 1, files.length);
+    if (s) s.zactive = true;
+
+    // Clear the rz prompt line
+    if (s) s.term.writeln('');
+
+    // Upload via SFTP
+    console.log('[RZ DEBUG] Starting SFTP upload');
+    const result = await window.electronAPI.sftpUploadFiles(sessionId, files, remoteCwd);
+    console.log('[RZ DEBUG] SFTP upload result:', result);
+
+    if (s) s.zactive = false;
+    hideTransfer();
+
+    if (result.ok) {
+      const successCount = result.results.filter(r => r.ok).length;
+      const failCount = result.results.filter(r => !r.ok).length;
       
-      if (!xfer) {
-        console.log('[RZ DEBUG] xfer is null, skipping');
-        continue;
+      if (failCount === 0) {
+        showToast(`✅ 上传完成 (${successCount} 个文件 → ${remoteCwd})`, 'success');
+      } else {
+        showToast(`⚠️ 上传部分完成: ${successCount} 成功, ${failCount} 失败`, 'error');
       }
       
-      if (s) s.ztransfer = xfer;
-      
-      const CHUNK = 8192; 
-      let off = 0;
-      
-      await new Promise((res, rej) => {
-        xfer.on('free', () => {
-          console.log(`[RZ DEBUG] xfer.free, off=${off}, length=${f.data.length}`);
-          if (off >= f.data.length) {
-            console.log('[RZ DEBUG] All data sent, calling end');
-            xfer.end().then(res).catch(rej);
-            return;
-          }
-          
-          const remaining = f.data.length - off;
-          const toSend = Math.min(CHUNK, remaining);
-          const sl = f.data.slice(off, off + toSend);
-          off += toSend;
-          
-          console.log(`[RZ DEBUG] Sending chunk: ${toSend} bytes, off=${off}`);
-          updateTransfer(off, f.data.length, t0);
-          xfer.send(sl);
+      if (s) {
+        s.term.writeln(`\x1b[32m[SFTP] 已上传 ${successCount} 个文件到 ${remoteCwd}\x1b[0m`);
+        result.results.forEach(r => {
+          if (r.ok) s.term.writeln(`\x1b[32m  ✓ ${r.name} (${fmtBytes(r.size)})\x1b[0m`);
+          else s.term.writeln(`\x1b[31m  ✗ ${r.name}: ${r.error}\x1b[0m`);
         });
-        
-        xfer.on('error', (e) => {
-          console.error('[RZ DEBUG] xfer error:', e);
-          rej(e);
-        });
-        
-        console.log('[RZ DEBUG] Calling xfer.start()');
-        xfer.start();
-      });
-      
-      successCount++;
-      console.log(`[RZ DEBUG] File ${f.name} uploaded successfully`);
-    } catch (e) {
-      console.error(`[RZ DEBUG] Error uploading ${f.name}:`, e);
-      showToast(`上传失败: ${f.name} - ${e.message}`, 'error');
+        s.term.writeln('');
+      }
+    } else {
+      showToast('❌ SFTP 上传失败: ' + result.error, 'error');
+      if (s) s.term.writeln(`\x1b[31m[SFTP] 上传失败: ${result.error}\x1b[0m\r\n`);
     }
-  }
-  
-  console.log('[RZ DEBUG] All files processed, closing session');
-  try {
-    await zs.close();
-    console.log('[RZ DEBUG] ZMODEM session closed');
   } catch (e) {
-    console.error('[RZ DEBUG] Error closing, aborting:', e);
-    try { zs.abort(); } catch (e2) { console.error('[RZ DEBUG] Abort failed:', e2); }
+    console.error('[RZ DEBUG] Unexpected error:', e);
+    showToast('上传异常: ' + e.message, 'error');
+    if (s) {
+      s.zactive = false;
+      s.ztransfer = null;
+      s.term.writeln(`\x1b[31m[SFTP] 上传异常: ${e.message}\x1b[0m\r\n`);
+    }
+    hideTransfer();
   }
-  
-  if (s) { s.zactive = false; s.ztransfer = null; }
-  hideTransfer();
-  
-  const msg = successCount === files.length 
-    ? `✅ 上传完成 (${successCount}/${files.length} 个文件)` 
-    : `⚠️ 部分上传 (${successCount}/${files.length} 个文件)`;
-  showToast(msg, successCount === files.length ? 'success' : 'info');
-  console.log(`[RZ DEBUG] Upload session finished: ${successCount}/${files.length} files`);
 }
 
 async function handleSZ(sessionId, zs) {
