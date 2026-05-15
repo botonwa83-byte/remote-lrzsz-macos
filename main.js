@@ -266,8 +266,24 @@ function uploadFileViaExec(conn, sessionId, localPath, remoteDest) {
 
 // Batch upload with progress
 ipcMain.handle('sftp-upload-files', async (_, { sessionId, files, remoteCwd }) => {
+  log(`[${sessionId}] sftp-upload-files called, ${files.length} files to ${remoteCwd}`);
+  
   const s = sessions.get(sessionId);
-  if (!s) return { ok: false, error: 'session not found' };
+  if (!s) {
+    log(`[${sessionId}] sftp-upload-files FAILED: session not found`);
+    return { ok: false, error: 'session not found' };
+  }
+  
+  if (!s.conn) {
+    log(`[${sessionId}] sftp-upload-files FAILED: connection not found`);
+    return { ok: false, error: 'connection not found' };
+  }
+  
+  // Check if connection is still alive
+  if (s.conn._destroyed) {
+    log(`[${sessionId}] sftp-upload-files FAILED: connection is destroyed`);
+    return { ok: false, error: 'connection is destroyed' };
+  }
 
   const results = [];
   for (let i = 0; i < files.length; i++) {
@@ -283,6 +299,7 @@ ipcMain.handle('sftp-upload-files', async (_, { sessionId, files, remoteCwd }) =
     });
   }
 
+  log(`[${sessionId}] sftp-upload-files completed: ${results.filter(r => r.ok).length}/${files.length} files`);
   return { ok: true, results };
 });
 ipcMain.on('ssh-resize', (_, { sessionId, cols, rows }) => {

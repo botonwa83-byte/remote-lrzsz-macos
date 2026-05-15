@@ -271,28 +271,10 @@ function activateSession(sessionId) {
 
 // ── ZMODEM ────────────────────────────────────────────────────────────────────
 function buildZSentry(sessionId, term) {
-  const sess = () => sessions.get(sessionId);
-  
-  // Track terminal output to detect rz command
-  let pendingRZ = false;
-  
+  // Disable ZMODEM detection to avoid connection issues
+  // Users should use the upload button instead
   return {
     consume: (bytes) => {
-      // Check if rz command is waiting for input
-      const str = new TextDecoder().decode(bytes);
-      if (str.includes('rz waiting to receive')) {
-        console.log('[RZ DETECT] Found rz waiting string');
-        if (!pendingRZ) {
-          pendingRZ = true;
-          setTimeout(() => {
-            if (pendingRZ) {
-              pendingRZ = false;
-              handleRZDirect(sessionId);
-            }
-          }, 500);
-        }
-      }
-      
       term.write(bytes);
     },
   };
