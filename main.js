@@ -98,7 +98,7 @@ ipcMain.handle('ssh-connect', (event, cfg) => {
       log(`[${sessionId}] READY → opening shell`);
       conn.shell({ term: 'xterm-256color', cols: 200, rows: 50 }, (err, stream) => {
         if (err) { conn.end(); return reject('shell: ' + err.message); }
-        sessions.set(sessionId, { conn, stream });
+        sessions.set(sessionId, { conn, stream, streamClosed: false });
         stream.on('data', data => {
           mainWin?.webContents.send('ssh-data', { sessionId, data: Array.from(data) });
         });
@@ -108,7 +108,16 @@ ipcMain.handle('ssh-connect', (event, cfg) => {
         stream.on('close', () => {
           log(`[${sessionId}] stream closed`);
           mainWin?.webContents.send('ssh-closed', { sessionId });
-          sessions.delete(sessionId);
+          const s = sessions.get(sessionId);
+          if (s) s.streamClosed = true;
+          // Delay deletion to allow pending operations (like SFTP upload) to complete
+          setTimeout(() => {
+            const s = sessions.get(sessionId);
+            if (s && s.streamClosed) {
+              sessions.delete(sessionId);
+              log(`[${sessionId}] session deleted after stream close`);
+            }
+          }, 2000);
         });
         resolve({ ok: true });
       });
@@ -173,6 +182,108 @@ ipcMain.handle('ssh-connect', (event, cfg) => {
 ipcMain.on('ssh-write', (_, { sessionId, data }) => {
   const s = sessions.get(sessionId);
   if (s) try { s.stream.write(Buffer.from(data)); } catch (e) { log('write err', e.message); }
+});
+
+// ── File Upload via exec channel (works on any server) ───────────────────────
+// Uses `cat > file` through an exec channel — no SFTP subsystem required.
+
+// Get remote home directory via exec channel
+ipcMain.handle('ssh-get-cwd', async (_, { sessionId }) => {
+  const s = sessions.get(sessionId);
+  if (!s) return { ok: false, error: 'session not found' };
+
+  return new Promise((resolve) => {
+    // Use eval echo ~ which always expands, even without $HOME set
+    s.conn.exec('eval echo ~', (err, stream) => {
+      if (err) return resolve({ ok: false, error: err.message });
+      let output = '';
+      stream.on('data', (data) => { output += data.toString(); });
+      stream.on('close', () => {
+        const cwd = output.trim();
+        // Validate we got an actual path, not a literal ~
+        if (cwd && cwd.startsWith('/')) {
+          resolve({ ok: true, cwd });
+        } else {
+          resolve({ ok: true, cwd: '/tmp' });
+        }
+      });
+    });
+  });
+});
+
+// Shell-escape a filename (wraps in single quotes, escapes inner single quotes)
+function shellEscape(s) {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+// Upload a single file via exec channel: base64 decode on remote side
+function uploadFileViaExec(conn, sessionId, localPath, remoteDest) {
+  return new Promise((resolve) => {
+    const fileData = fs.readFileSync(localPath);
+    const b64 = fileData.toString('base64');
+    log(`[${sessionId}] exec upload: ${localPath} → ${remoteDest} (${fileData.length} bytes, ${b64.length} b64)`);
+
+    const cmd = `base64 -d > ${shellEscape(remoteDest)}`;
+    log(`[${sessionId}] exec cmd: ${cmd}`);
+
+    conn.exec(cmd, (err, stream) => {
+      if (err) {
+        log(`[${sessionId}] exec error:`, err.message);
+        return resolve({ ok: false, error: err.message });
+      }
+
+      let stderr = '';
+      stream.stderr.on('data', (data) => { stderr += data.toString(); });
+
+      stream.on('close', (code) => {
+        if (code === 0 || code === null) {
+          log(`[${sessionId}] exec upload done: ${remoteDest}`);
+          resolve({ ok: true, size: fileData.length });
+        } else {
+          log(`[${sessionId}] exec upload failed (code ${code}): ${stderr}`);
+          resolve({ ok: false, error: stderr.trim() || `exit code ${code}` });
+        }
+      });
+
+      // Write base64 data in chunks with backpressure
+      const CHUNK = 48 * 1024;
+      let off = 0;
+      function writeNext() {
+        while (off < b64.length) {
+          const chunk = b64.slice(off, off + CHUNK);
+          off += chunk.length;
+          if (!stream.write(chunk)) {
+            stream.once('drain', writeNext);
+            return;
+          }
+        }
+        stream.end();
+      }
+      writeNext();
+    });
+  });
+}
+
+// Batch upload with progress
+ipcMain.handle('sftp-upload-files', async (_, { sessionId, files, remoteCwd }) => {
+  const s = sessions.get(sessionId);
+  if (!s) return { ok: false, error: 'session not found' };
+
+  const results = [];
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const remoteDest = remoteCwd + '/' + file.name;
+
+    const result = await uploadFileViaExec(s.conn, sessionId, file.localPath, remoteDest);
+    results.push({ name: file.name, ...result });
+
+    mainWin?.webContents.send('sftp-progress', {
+      sessionId, current: i + 1, total: files.length,
+      name: file.name, size: result.size || 0,
+    });
+  }
+
+  return { ok: true, results };
 });
 ipcMain.on('ssh-resize', (_, { sessionId, cols, rows }) => {
   const s = sessions.get(sessionId);
