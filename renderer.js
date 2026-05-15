@@ -117,6 +117,10 @@ function openModal(c = null) {
   $('#f-pass').value        = c?.password    || '';
   $('#f-key').value         = c?.privateKeyPath || '';
   $('#f-passphrase').value  = c?.passphrase  || '';
+  $('#f-bastion-host').value = c?.bastionHost || '';
+  $('#f-bastion-port').value = c?.bastionPort || 22;
+  $('#f-bastion-user').value = c?.bastionUser || '';
+  $('#f-bastion-pass').value = c?.bastionPass || '';
   setAuthTab(c?.authType || 'password');
   modal.classList.add('open');
   setTimeout(() => $('#f-host').focus(), 80);
@@ -135,6 +139,7 @@ async function saveAndConnect() {
   if (!host || !user) { showToast('主机和用户名不能为空', 'error'); return; }
 
   const authType = document.querySelector('.auth-tab.active').dataset.auth;
+  const bastionHost = $('#f-bastion-host').value.trim();
   const c = {
     id:             editingId || uid(),
     name:           $('#f-name').value.trim() || host,
@@ -143,6 +148,10 @@ async function saveAndConnect() {
     password:       authType === 'password' ? $('#f-pass').value : '',
     privateKeyPath: authType === 'key'      ? $('#f-key').value.trim() : '',
     passphrase:     authType === 'key'      ? $('#f-passphrase').value : '',
+    bastionHost:    bastionHost,
+    bastionPort:    bastionHost ? (parseInt($('#f-bastion-port').value) || 22) : undefined,
+    bastionUser:    bastionHost ? $('#f-bastion-user').value.trim() : undefined,
+    bastionPass:    bastionHost ? $('#f-bastion-pass').value : undefined,
   };
 
   const btn = $('#modal-save-btn');

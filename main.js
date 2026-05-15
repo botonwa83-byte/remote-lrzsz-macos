@@ -83,8 +83,11 @@ app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) creat
 
 // ── SSH Connect ───────────────────────────────────────────────────────────────
 ipcMain.handle('ssh-connect', (event, cfg) => {
-  const { sessionId, host, port, username, password, privateKeyPath, passphrase } = cfg;
+  const { sessionId, host, port, username, password, privateKeyPath, passphrase, bastionHost, bastionPort, bastionUser, bastionKey, bastionPass } = cfg;
   log(`ssh-connect called: ${username}@${host}:${port} sid=${sessionId}`);
+  if (bastionHost) {
+    log(`[${sessionId}] Bastion configured: ${bastionUser}@${bastionHost}:${bastionPort || 22}`);
+  }
 
   if (!SSHClient) {
     log('ERROR: SSHClient not loaded');
@@ -172,6 +175,19 @@ ipcMain.handle('ssh-connect', (event, cfg) => {
     } else {
       connCfg.password    = password;
       connCfg.tryKeyboard = true;
+    }
+
+    // 添加堡垒机支持 (ProxyJump)
+    if (bastionHost) {
+      log(`[${sessionId}] Setting up ProxyJump via ${bastionHost}`);
+      connCfg.proxyJump = {
+        host: bastionHost,
+        port: Number(bastionPort) || 22,
+        username: bastionUser,
+        password: bastionPass,
+        privateKey: bastionKey ? fs.readFileSync(bastionKey) : undefined,
+        passphrase: bastionPass,
+      };
     }
 
     log(`[${sessionId}] calling conn.connect()...`);

@@ -105,6 +105,24 @@
           <input id="f-passphrase" type="password" placeholder="passphrase" />
         </div>
       </div>
+      <div class="field-row" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+        <div class="field" style="flex:2">
+          <label>堡垒机 (可选)</label>
+          <input id="f-bastion-host" type="text" placeholder="bastion.example.com" />
+        </div>
+        <div class="field" style="flex:1">
+          <label>端口</label>
+          <input id="f-bastion-port" type="number" value="22" min="1" max="65535" />
+        </div>
+      </div>
+      <div class="field" id="bastion-auth">
+        <label>堡垒机用户名</label>
+        <input id="f-bastion-user" type="text" placeholder="用户名" />
+      </div>
+      <div class="field">
+        <label>堡垒机密码/私钥</label>
+        <input id="f-bastion-pass" type="password" placeholder="密码或私钥路径" />
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" id="modal-cancel-btn">取消</button>
