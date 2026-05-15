@@ -271,58 +271,61 @@ function activateSession(sessionId) {
 
 // ── ZMODEM ────────────────────────────────────────────────────────────────────
 function buildZSentry(sessionId, term) {
-  // If Zmodem not loaded, return a passthrough stub
-  if (typeof Zmodem === 'undefined') {
-    console.warn('Zmodem not loaded — lrzsz disabled, SSH still works');
-    return {
-      consume: (bytes) => term.write(bytes),
-    };
-  }
   const sess = () => sessions.get(sessionId);
-  return new Zmodem.Sentry({
-    to_terminal: oct => term.write(new Uint8Array(oct)),
-    sender:      oct => window.electronAPI.writeSSH(sessionId, Array.from(oct)),
-    on_retract:  ()  => { const s=sess(); if(s){s.zactive=false;s.ztransfer=null;} hideTransfer(); },
-    async on_detect(det) {
-      const s = sess(); if (!s) return;
-      s.zactive = true; s.ztransfer = det;
-      const zs = det.confirm();
-      if (zs.type === 'send') await handleRZ(sessionId, zs);
-      else                    await handleSZ(sessionId, zs);
+  
+  // Track terminal output to detect rz command
+  let pendingRZ = false;
+  
+  return {
+    consume: (bytes) => {
+      // Check if rz command is waiting for input
+      const str = new TextDecoder().decode(bytes);
+      if (str.includes('rz waiting to receive')) {
+        console.log('[RZ DETECT] Found rz waiting string');
+        if (!pendingRZ) {
+          pendingRZ = true;
+          setTimeout(() => {
+            if (pendingRZ) {
+              pendingRZ = false;
+              handleRZDirect(sessionId);
+            }
+          }, 500);
+        }
+      }
+      
+      term.write(bytes);
     },
-  });
+  };
 }
 
-async function handleRZ(sessionId, zs) {
+async function handleRZDirect(sessionId) {
   const s = sessions.get(sessionId);
-  console.log('[RZ DEBUG] Starting SFTP upload instead of ZMODEM');
+  console.log('[RZ DIRECT] Starting SFTP upload (direct mode)');
+
+  if (!s) {
+    console.error('[RZ DIRECT] Session not found');
+    return;
+  }
 
   try {
-    // Show file selection dialog FIRST, before aborting ZMODEM
+    // Show file selection dialog
     showToast('请选择要上传的文件…（使用 SFTP 传输）');
     const dialogResult = await window.electronAPI.showOpenDialog({ properties: ['openFile','multiSelections'] });
     if (dialogResult.canceled || !dialogResult.filePaths.length) { 
-      // User canceled - just abort ZMODEM and return
-      try { zs.abort(); } catch (_) {}
-      if (s) { s.zactive = false; s.ztransfer = null; }
       hideTransfer();
       return; 
     }
 
-    // Now abort ZMODEM session (after user selected files)
-    try { zs.abort(); } catch (_) {}
-    if (s) { s.zactive = false; s.ztransfer = null; }
-
     // Get remote working directory
-    console.log('[RZ DEBUG] Getting remote CWD');
+    console.log('[RZ DIRECT] Getting remote CWD');
     const cwdResult = await window.electronAPI.sshGetCwd(sessionId);
     if (!cwdResult.ok) {
       showToast('获取远程目录失败: ' + cwdResult.error, 'error');
-      if (s) s.term.writeln(`\r\n\x1b[31m[SFTP] 获取目录失败: ${cwdResult.error}\x1b[0m\r\n`);
+      s.term.writeln(`\r\n\x1b[31m[SFTP] 获取目录失败: ${cwdResult.error}\x1b[0m\r\n`);
       return;
     }
     const remoteCwd = cwdResult.cwd;
-    console.log('[RZ DEBUG] Remote CWD:', remoteCwd);
+    console.log('[RZ DIRECT] Remote CWD:', remoteCwd);
 
     // Prepare file list
     const files = dialogResult.filePaths.map(fp => ({
@@ -330,16 +333,21 @@ async function handleRZ(sessionId, zs) {
       name: fp.split('/').pop() || fp.split('\\').pop(),
     }));
 
-    console.log('[RZ DEBUG] Files to upload:', files);
+    console.log('[RZ DIRECT] Files to upload:', files);
     showTransfer('upload', files[0].name, 0, 1, files.length);
-    if (s) s.zactive = true;
+    s.zactive = true;
+
+    // Send Ctrl+C to cancel the original rz command
+    // (this is safe now since we've already confirmed session exists)
+    window.electronAPI.writeSSH(sessionId, Array.from(new TextEncoder().encode('\x03')));
+    await new Promise(r => setTimeout(r, 200));
 
     // Upload via SFTP (exec channel)
-    console.log('[RZ DEBUG] Starting SFTP upload');
+    console.log('[RZ DIRECT] Starting SFTP upload');
     const result = await window.electronAPI.sftpUploadFiles(sessionId, files, remoteCwd);
-    console.log('[RZ DEBUG] SFTP upload result:', result);
+    console.log('[RZ DIRECT] SFTP upload result:', result);
 
-    if (s) s.zactive = false;
+    s.zactive = false;
     hideTransfer();
 
     if (result.ok) {
@@ -352,21 +360,19 @@ async function handleRZ(sessionId, zs) {
         showToast(`⚠️ 上传部分完成: ${successCount} 成功, ${failCount} 失败`, 'error');
       }
       
-      if (s) {
-        s.term.writeln('\r');
-        s.term.writeln(`\x1b[32m[SFTP] 已上传 ${successCount} 个文件到 ${remoteCwd}\x1b[0m`);
-        result.results.forEach(r => {
-          if (r.ok) s.term.writeln(`\x1b[32m  ✓ ${r.name} (${fmtBytes(r.size)})\x1b[0m`);
-          else s.term.writeln(`\x1b[31m  ✗ ${r.name}: ${r.error}\x1b[0m`);
-        });
-        s.term.writeln('');
-      }
+      s.term.writeln('\r');
+      s.term.writeln(`\x1b[32m[SFTP] 已上传 ${successCount} 个文件到 ${remoteCwd}\x1b[0m`);
+      result.results.forEach(r => {
+        if (r.ok) s.term.writeln(`\x1b[32m  ✓ ${r.name} (${fmtBytes(r.size)})\x1b[0m`);
+        else s.term.writeln(`\x1b[31m  ✗ ${r.name}: ${r.error}\x1b[0m`);
+      });
+      s.term.writeln('');
     } else {
       showToast('❌ SFTP 上传失败: ' + result.error, 'error');
-      if (s) s.term.writeln(`\r\n\x1b[31m[SFTP] 上传失败: ${result.error}\x1b[0m\r\n`);
+      s.term.writeln(`\r\n\x1b[31m[SFTP] 上传失败: ${result.error}\x1b[0m\r\n`);
     }
   } catch (e) {
-    console.error('[RZ DEBUG] Unexpected error:', e);
+    console.error('[RZ DIRECT] Unexpected error:', e);
     showToast('上传异常: ' + e.message, 'error');
     if (s) {
       s.zactive = false;
@@ -375,6 +381,10 @@ async function handleRZ(sessionId, zs) {
     }
     hideTransfer();
   }
+}
+
+async function handleRZ(sessionId, zs) {
+  handleRZDirect(sessionId);
 }
 
 async function handleSZ(sessionId, zs) {
