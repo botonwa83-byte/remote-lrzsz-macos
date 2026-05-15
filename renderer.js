@@ -298,23 +298,20 @@ async function handleRZ(sessionId, zs) {
   console.log('[RZ DEBUG] Starting SFTP upload instead of ZMODEM');
 
   try {
-    // Abort ZMODEM session and clean up
-    try { zs.abort(); } catch (_) {}
-    if (s) { s.zactive = false; s.ztransfer = null; }
-
-    // Send Ctrl+C to kill remote rz process
-    await new Promise(r => setTimeout(r, 100));
-    window.electronAPI.writeSSH(sessionId, Array.from(new TextEncoder().encode('\x03')));
-    await new Promise(r => setTimeout(r, 200));
-
-    // Show file selection dialog
+    // Show file selection dialog FIRST, before aborting ZMODEM
     showToast('请选择要上传的文件…（使用 SFTP 传输）');
     const dialogResult = await window.electronAPI.showOpenDialog({ properties: ['openFile','multiSelections'] });
     if (dialogResult.canceled || !dialogResult.filePaths.length) { 
-      hideTransfer(); 
-      if (s) s.term.writeln('\r\n');
+      // User canceled - just abort ZMODEM and return
+      try { zs.abort(); } catch (_) {}
+      if (s) { s.zactive = false; s.ztransfer = null; }
+      hideTransfer();
       return; 
     }
+
+    // Now abort ZMODEM session (after user selected files)
+    try { zs.abort(); } catch (_) {}
+    if (s) { s.zactive = false; s.ztransfer = null; }
 
     // Get remote working directory
     console.log('[RZ DEBUG] Getting remote CWD');
@@ -337,10 +334,7 @@ async function handleRZ(sessionId, zs) {
     showTransfer('upload', files[0].name, 0, 1, files.length);
     if (s) s.zactive = true;
 
-    // Clear the rz prompt line
-    if (s) s.term.writeln('');
-
-    // Upload via SFTP
+    // Upload via SFTP (exec channel)
     console.log('[RZ DEBUG] Starting SFTP upload');
     const result = await window.electronAPI.sftpUploadFiles(sessionId, files, remoteCwd);
     console.log('[RZ DEBUG] SFTP upload result:', result);
@@ -359,6 +353,7 @@ async function handleRZ(sessionId, zs) {
       }
       
       if (s) {
+        s.term.writeln('\r');
         s.term.writeln(`\x1b[32m[SFTP] 已上传 ${successCount} 个文件到 ${remoteCwd}\x1b[0m`);
         result.results.forEach(r => {
           if (r.ok) s.term.writeln(`\x1b[32m  ✓ ${r.name} (${fmtBytes(r.size)})\x1b[0m`);
@@ -368,7 +363,7 @@ async function handleRZ(sessionId, zs) {
       }
     } else {
       showToast('❌ SFTP 上传失败: ' + result.error, 'error');
-      if (s) s.term.writeln(`\x1b[31m[SFTP] 上传失败: ${result.error}\x1b[0m\r\n`);
+      if (s) s.term.writeln(`\r\n\x1b[31m[SFTP] 上传失败: ${result.error}\x1b[0m\r\n`);
     }
   } catch (e) {
     console.error('[RZ DEBUG] Unexpected error:', e);
